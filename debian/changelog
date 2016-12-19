@@ -1,0 +1,5 @@
+cassandra-mirror (0.0.1) UNRELEASED; urgency=medium
+
+  * Initial release.
+
+ -- Josh Snyder <josh.snyder@fitbit.com>  Tue, 06 Dec 2016 00:38:29 -0800
