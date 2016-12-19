@@ -59,8 +59,8 @@ def download_to_path(config, s3_object, path):
         '-b', s3_object.bucket_name,
         '-k', s3_object.key,
     ].with_env(**config['s3']['credentials'])
-   
-    path.mkdir() 
+
+    path.mkdir()
 
     basename = s3_object.key.split('/')[-1]
 
@@ -70,7 +70,7 @@ def download_to_path(config, s3_object, path):
         lz4['-d'] |
         tar['-C', path, '-x']
     ) & FG
-    
+
 def get_objects_to_download_for_cf(config, bucket, prefix, ks, cf):
     for i in bucket.objects.filter(
         Prefix='{}/{}/{}/manifest/'.format(prefix, ks, cf),
@@ -84,7 +84,7 @@ def get_objects_to_download_for_cf(config, bucket, prefix, ks, cf):
             generation, mtime = line.split()
             generation_dir = cf_dir / generation
             sstable_prefix = '{}/{}/{}/data/{}'.format(prefix, ks, cf, generation)
-           
+
             reversed_mtime = (1<<64) - int(mtime)
             s3_objects = map(bucket.Object, (
                 '{}/mutable/{:020}'.format(sstable_prefix, reversed_mtime),
@@ -107,8 +107,8 @@ def get_creds_dict():
     if creds.token is not None:
         creds_dict['AWS_SECURITY_TOKEN'] = creds.token
     return creds_dict
-        
-def restore():
+
+def do_restore():
     config_filename = os.path.expanduser('~/backups.yaml')
     config = load_config(config_filename)
 
@@ -118,13 +118,13 @@ def restore():
     bucket = config['s3']['bucket']
     s3 = boto3.resource('s3')
     bucket = s3.Bucket(bucket)
-    prefix = compute_source_prefix(config) 
+    prefix = compute_source_prefix(config)
 
     objects = get_objects_to_download(config, bucket, prefix)
     def download(args):
         return download_to_path(config, *args)
 
-    # It is assumed we'll be disk-bound, so I've chosen a typical disk queue depth. 
+    # It is assumed we'll be disk-bound, so I've chosen a typical disk queue depth.
     with futures.ThreadPoolExecutor(max_workers=32) as executor:
         results = executor.map(download, objects)
 

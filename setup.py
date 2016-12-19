@@ -10,7 +10,7 @@ setup(
     entry_points=dict(
     console_scripts=[
             'backup=cassandra_mirror.backup:backup',
-            'restore=cassandra_mirror.restore:restore',
+            'restore=cassandra_mirror.restore:do_restore',
         ]
     ),
 )
