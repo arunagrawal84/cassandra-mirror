@@ -1,7 +1,6 @@
 from collections import namedtuple
 from contextlib import contextmanager
 from operator import attrgetter
-from tempfile import NamedTemporaryFile
 from tempfile import mkdtemp
 import argparse
 import functools
@@ -11,7 +10,8 @@ import os
 import os.path
 import time
 
-from plumbum import BG
+from keypipe.plumbum_helpers import ThreadCommand
+from plumbum import FG
 from plumbum import LocalPath
 from boto3.s3.transfer import TransferConfig
 from boto3.s3.transfer import TransferManager
@@ -20,10 +20,13 @@ import keypipe
 import yaml
 
 from plumbum.cmd import dd
-from plumbum.cmd import tar
 from plumbum.cmd import lz4
+from plumbum.cmd import tar
+from plumbum.cmd import s3gof3r
 
+from .util import get_creds_dict
 from .util import load_config
+from .util import timed_touch
 
 def apply(f):
     def wrap(g):
@@ -132,9 +135,15 @@ class SSTable(namedtuple('SSTable', 'path dirname keyspace cf_name cf_uuid versi
     def get_immutable_files(self):
         return [
             self.construct_path(f) for f
-            in self.path.open(mode='r')
+            in self.toc_items()
             if f != 'Statistics.db'
         ]
+
+    def toc_items(self):
+        return map(
+            lambda i: i.rstrip(),
+            self.path.open(mode='r')
+        )
 
     def get_mutable_files(self):
         return [self.construct_path('Statistics.db')]
@@ -150,6 +159,8 @@ def compute_destination_prefix(config, cf_path):
 
 
 def tar_stream_command(dirname, files):
+    # By this point the files should be safely hard linked, so mtime and size
+    # can't change from under us.
     size = sum(map(lambda f: f.stat().st_size, files))
     max_mtime = max(f.stat().st_mtime_ns for f in files)
     filenames = tuple(map(lambda f: f.basename, files))
@@ -197,38 +208,22 @@ def upload_pipe(config, s3_key, data_cmd, mtime):
     Dataflow: data_cmd | lz4 | keypipe | s3
     """
 
-    # Client creation isn't thread-safe, so we do it in advance
-    s3 = boto3.client('s3')
+    credentials = get_creds_dict()
 
-    (encrypt_r, compress_w) = closeable_pipe()
-    (s3_r, encrypt_w) = closeable_pipe()
-    compressed_stream_f = (data_cmd | lz4 > compress_w) & BG
-    compress_w.close()
+    gof3r_cmd = s3gof3r[
+        'put',
+        '--no-md5',
+        '-b', config['s3']['bucket'],
+        '-k', s3_key,
+    ].with_env(**credentials)
 
-    encryption_thread = keypipe.seal_thread(
+    keypipe_partial = functools.partial(
+        keypipe.seal,
         config['encryption']['provider'],
-        config['encryption']['args'],
-        encrypt_r,
-        encrypt_w,
+        config['encryption']['args']
     )
 
-    #TODO: maybe use s3gof3r in lieu or addition
-    s3_fileobj = os.fdopen(s3_r, 'rb')
-    with s3_upload_future(
-        s3_fileobj,
-        s3,
-        config['s3']['bucket'],
-        s3_key,
-        extra_args=dict(Metadata={'Max-File-MTime': str(mtime)}),
-    ) as s3_future:
-        compressed_stream_f.wait()
-
-        encryption_thread.join()
-        encrypt_r.close()
-        encrypt_w.close()
-
-        s3_future.result()
-    s3_r.close()
+    (data_cmd | lz4 / keypipe_partial | gof3r_cmd) & FG
 
 
 def timed_upload_pipe(*args, **kwargs):
@@ -242,6 +237,9 @@ def upload_sstable(config, upload_prefix, sstable):
     marker_dir = sstable.path.dirname.dirname / 'uploaded'
     marker_dir.mkdir()
 
+    immutable_marker = marker_dir / 'immutable'
+    mutable_marker = marker_dir / 'mutable'
+
     # the S3 prefix to be used by all uploaded components
     sstable_prefix = '/'.join((
         upload_prefix,
@@ -249,7 +247,6 @@ def upload_sstable(config, upload_prefix, sstable):
         '{:010}'.format(sstable.generation),
     ))
 
-    immutable_marker = marker_dir / 'immutable'
     if not immutable_marker.exists():
         immutable_files = sstable.get_immutable_files()
         upload_key = '/'.join((sstable_prefix, 'immutable'))
@@ -259,9 +256,8 @@ def upload_sstable(config, upload_prefix, sstable):
         )
 
         timed_upload_pipe(config, upload_key, cmd, mtime)
-        immutable_marker.touch()
+        timed_touch(immutable_marker, mtime)
 
-    mutable_marker = marker_dir / 'mutable'
     mutable_files = sstable.get_mutable_files()
     cmd, size, mtime = tar_stream_command(
         sstable.path.dirname,
@@ -279,10 +275,7 @@ def upload_sstable(config, upload_prefix, sstable):
         ))
 
         timed_upload_pipe(config, upload_key, cmd, mtime)
-        with NamedTemporaryFile(dir=mutable_marker.dirname) as f:
-            fd = f.fileno()
-            os.utime(f.name, ns=(mtime, mtime))
-            os.link(f.name, str(mutable_marker))
+        timed_touch(mutable_marker, mtime)
 
     return sstable.generation, mtime
 
@@ -317,8 +310,11 @@ def hardlink_sstable(state_dir, sstable):
         dest = state_path / f.name
 
         # If the inodes no longer match, delete and replace the file.
-        if dest.stat().st_ino != f.stat().st_ino:
-            dest.unlink()
+        if not dest.exists() or dest.stat().st_ino != f.stat().st_ino:
+            try:
+                dest.unlink()
+            except FileNotFoundError:
+                pass
             f.link(dest)
 
     return SSTable.from_copied_toc(state_path / sstable.path.name)
@@ -354,7 +350,7 @@ def actual_upload_manifest(bucket, prefix, sstable, tables):
     )
 
 def upload_manifest(bucket, dest_prefix, sstable, tables):
-    marker = sstable.path.dirname.dirname / 'manifest_uploaded'
+    marker = sstable.path.dirname.dirname / 'uploaded' / 'manifest'
     if not marker.exists():
         actual_upload_manifest(bucket, dest_prefix, sstable, tables)
 
