@@ -7,6 +7,7 @@ docutils==0.12
 jmespath==0.9.0
 keypipe==0.0.1
 plumbum==1.6.2
+git+https://github.com/tomerfiliba/plumbum.git@bd6299bf9ba9242096c2a2d22fb4633b88f5212c
 pycparser==2.17
 python-dateutil==2.6.0
 s3transfer==0.1.9
