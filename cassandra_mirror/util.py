@@ -1,41 +1,26 @@
 from contextlib import contextmanager
+
 from plumbum.path import LocalPath
 from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory
 import os
 
 from cachetools.func import ttl_cache
 import boto3
+import json
 import yaml
+
+# This is incorporated into the encryption context, representing the program that uploaded the
+# file. The goal is to disambiguate the files produced by this utility from files produced by some
+# other utility. It is called a continuity code because it will remain the same for the life of
+# the project.
+continuity_code = 'dcb4246e-f8ac-400e-b005-61c751a75134'
 
 def load_config(path):
     config_f = open(path, 'r')
     return yaml.safe_load(config_f)
 
 _multipart_chunksize = 20 * 1024 * 1024
-
-@contextmanager
-def s3_upload_future(infile, client, bucket, key, extra_args=None):
-    config = TransferConfig(multipart_chunksize=_multipart_chunksize)
-    with TransferManager(client, config) as manager:
-        future = manager.upload(
-            fileobj=infile,
-            bucket=bucket,
-            key=key,
-            extra_args=extra_args
-        )
-        yield future
-
-@contextmanager
-def s3_download_future(outfile, client, bucket, key):
-    config = TransferConfig(multipart_chunksize=_multipart_chunksize)
-    with TransferManager(client, config) as manager:
-        future = manager.download(
-            fileobj=outfile,
-            bucket=bucket,
-            key=key,
-            extra_args=extra_args
-        )
-        yield future
 
 def timed_touch(path, mtime):
     try:
@@ -64,4 +49,62 @@ def compose(f):
         return wrapped
     return wrapper
 
+def moving_temporary_file(destination):
+    ret = NamedTemporaryFile(
+        prefix=destination.name + '.',
+        dir=destination.up(),
+    )
+    def finalize():
+        os.link(ret.name, str(destination))
 
+    ret.finalize = finalize
+    return ret
+
+class MovingTemporaryDirectory(TemporaryDirectory):
+    """Represents a directory that may have partial or incorrect data in it.
+
+    The idea is that a process will create the directory, fill it with data,
+    and then move it to its final location. Up until the final move, the
+    directory is "temporary": it will be deleted on exit from its
+    contextmanager. Once the final move is done, the directory is permanent.
+    """
+
+    def __init__(self, destination):
+        self.destination = str(destination)
+        super().__init__(
+            prefix=destination.name + '.',
+            dir=destination.up(),
+        )
+
+    def __enter__(self):
+        return self
+
+    @property
+    def path(self):
+        return LocalPath(self.name)
+
+    def finalize(self):
+        # plumbum's rename is based on shutil.move, and will nest directories
+        # So you'll get data/data.XXXXXX, if the destination data directory
+        # already existed.
+        os.rename(self.name, self.destination)
+        try:
+            self.cleanup()
+        except FileNotFoundError:
+            # We expect to hit this in 100% of cases, because we renamed the
+            # directory.
+            # Making this call sets the flag indicating the file has deleted,
+            # so that __exit__ does not complain
+            pass
+
+
+def compute_top_prefix(config, identity):
+    prefix = config['s3']['prefix_format'].format(**config['context'])
+    return '/'.join((
+        prefix,
+        'v1',
+        identity
+    ))
+
+def serialize_context(o):
+    return json.dumps(o, sort_keys=True).encode('ascii')
