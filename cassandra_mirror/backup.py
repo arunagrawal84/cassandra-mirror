@@ -18,6 +18,13 @@ from plumbum.cmd import tar
 from plumbum.cmd import s3gof3r
 
 from .identity import get_identity
+
+from .backup_helpers import is_sstable_toc
+from .backup_helpers import stat_helper
+
+from .obsoletion import cleanup_obsoleted
+from .obsoletion import mark_obsoleted
+
 from .util import MovingTemporaryDirectory
 from .util import get_creds_dict
 from .util import compute_top_prefix
@@ -29,14 +36,6 @@ from .util import timed_touch
 logger = logging.getLogger(__name__)
 
 s3 = boto3.resource('s3')
-
-def is_sstable_toc(path):
-    split = path.basename.split('-', 3)
-    is_tmp = len(split) >= 2 and split in ('tmp', 'tmplink')
-    return (path.endswith('-TOC.txt')
-        and not is_tmp
-        and path.isfile() # not a link or a directory
-    )
 
 # A recursive directory walker
 def find(path, depth):
@@ -314,16 +313,6 @@ def actual_hardlink_sstable(sstable, state_path):
         d.path.chmod(0o750)
         d.finalize()
 
-def stat_helper(path):
-    """os.path.exists will return None for PermissionError, leading us to
-    believe a file is not present when it, in fact, is. This is awful.
-    """
-
-    try:
-        return path.stat()
-    except FileNotFoundError:
-        return None
-
 def hardlink_sstable(state_dir, sstable):
     state_path = (
         state_dir / sstable.keyspace /
@@ -423,12 +412,13 @@ def backup_columnfamily(links_dir, config, identity, cf_path):
             uploaded_sstables
         )
 
-def backup_all_sstables(config, state_dir):
-    links_dir = state_dir / 'links'
+def backup_all_sstables(config, locs):
+    identity = get_identity(locs.state_dir)
+    for cf_path in get_columnfamilies(locs.data_dir):
+        backup_columnfamily(locs.links_dir, config, identity, cf_path)
 
-    identity = get_identity(state_dir)
-    for cf_path in get_columnfamilies(data_dir):
-        backup_columnfamily(links_dir, config, identity, cf_path)
+class Locations(namedtuple('Locations', 'data_dir sstables_dir state_dir links_dir')):
+    pass
 
 def do_backup():
     config_filename = os.path.expanduser('~/backups.yaml')
@@ -444,4 +434,7 @@ def do_backup():
     )
     state_dir.mkdir()
 
-    backup_all_sstables(config, state_dir)
+    locs = Locations(data_dir, data_dir / 'data', state_dir, state_dir / 'links')
+    backup_all_sstables(config, locs)
+    mark_obsoleted(locs)
+    cleanup_obsoleted(locs, 0)
