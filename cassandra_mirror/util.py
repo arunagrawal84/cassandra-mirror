@@ -23,6 +23,10 @@ def load_config(path):
 _multipart_chunksize = 20 * 1024 * 1024
 
 def timed_touch(path, mtime):
+    """Sets the time on `path` to `mtime`, atomically. If `path` does not
+    exist, it is created. If we create `path`, we guarantee that it will either
+    exist with the correct mtime or not exist at all.
+    """
     try:
         os.utime(path, ns=(mtime, mtime))
     except FileNotFoundError:
