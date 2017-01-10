@@ -1,37 +1,34 @@
 from collections import namedtuple
-from contextlib import contextmanager
 from operator import attrgetter
-from tempfile import NamedTemporaryFile
-from tempfile import mkdtemp
-import argparse
 import functools
-import itertools
 import logging
-import os
 import os.path
 import time
+import sys
 
-from plumbum import BG
+# This import patches plumbum's BaseCommand.
+from keypipe.plumbum_helpers import ThreadCommand
+from plumbum import FG
 from plumbum import LocalPath
-from boto3.s3.transfer import TransferConfig
-from boto3.s3.transfer import TransferManager
 import boto3
 import keypipe
-import yaml
 
-from plumbum.cmd import dd
-from plumbum.cmd import tar
 from plumbum.cmd import lz4
+from plumbum.cmd import tar
+from plumbum.cmd import s3gof3r
 
+from .identity import get_identity
+from .util import MovingTemporaryDirectory
+from .util import get_creds_dict
+from .util import compute_top_prefix
+from .util import continuity_code
 from .util import load_config
+from .util import serialize_context
+from .util import timed_touch
 
-def apply(f):
-    def wrap(g):
-        @functools.wraps(g)
-        def wrapped(*args, **kwargs):
-            return f(g(*args, **kwargs))
-        return wrapped
-    return wrap
+logger = logging.getLogger(__name__)
+
+s3 = boto3.resource('s3')
 
 def is_sstable_toc(path):
     split = path.basename.split('-', 3)
@@ -59,7 +56,7 @@ def get_sstables_for_columnfamily(path):
     attempts = 0
 
     """
-    getdents contains no atomicity guarantee, and we need to be sure we get
+    getdents provides no atomicity guarantee, and we need to be sure we get
     all SSTables for a given columnfamily. If we fail, we will miss SSTables
     with data in them!
     The race we wish to avoid is:
@@ -69,8 +66,8 @@ def get_sstables_for_columnfamily(path):
       cassandra: delete ancestor SSTables
       backup process: readdir() the rest of the directory
 
-    It is entirely possible for readdir to not see either the new compacted
-    SSTable or the ancestor SSTables that were just deleted.
+    It is entirely possible for readdir to see neither the new compacted
+    SSTable nor the ancestor SSTables that were just deleted.
 
     We can/must use sstableutil for Cassandra 3.x
     """
@@ -125,31 +122,44 @@ class SSTable(namedtuple('SSTable', 'path dirname keyspace cf_name cf_uuid versi
             self.cf_name,
             self.version,
             str(self.generation),
-            toc_entry.rstrip(),
+            toc_entry,
         ))
         return self.dirname / name
 
     def get_immutable_files(self):
         return [
             self.construct_path(f) for f
-            in self.path.open(mode='r')
+            in self.toc_items()
             if f != 'Statistics.db'
         ]
+
+    def toc_items(self):
+        return map(
+            lambda i: i.rstrip(),
+            self.path.open(mode='r')
+        )
 
     def get_mutable_files(self):
         return [self.construct_path('Statistics.db')]
 
-def compute_destination_prefix(config, cf_path):
+    def get_context(self):
+        return dict(
+            keyspace=self.keyspace,
+            columnfamily='{}-{}'.format(self.cf_name, self.cf_uuid),
+            generation=self.generation,
+            continuity=continuity_code,
+        )
+
+def compute_destination_prefix(config, identity, cf_path):
     return '/'.join((
-        config['s3']['prefix'],
-        #TODO: just read the uuid out of Cassandra
-        config['identity'],
+        compute_top_prefix(config, identity),
         cf_path.dirname.name,
         cf_path.name,
     ))
 
-
 def tar_stream_command(dirname, files):
+    # By this point the files should be safely hard linked, so mtime and size
+    # can't change from under us.
     size = sum(map(lambda f: f.stat().st_size, files))
     max_mtime = max(f.stat().st_mtime_ns for f in files)
     filenames = tuple(map(lambda f: f.basename, files))
@@ -158,89 +168,126 @@ def tar_stream_command(dirname, files):
     cmd = tar.__getitem__(tar_args)
     return cmd, size, max_mtime
 
-class ClosableFD(int):
-    closed = False
-
-    def close(self):
-        # Our basic purpose, which is to prevent the same FD from being closed
-        # twice
-        if not self.closed:
-            self.closed = True
-            os.close(self)
-
-    def __enter__():
-        pass
-
-    def __exit__():
-        self.close()
-
-def closeable_pipe():
-    return map(ClosableFD, os.pipe())
-
-@contextmanager
-def s3_upload_future(infile, client, bucket, key, extra_args=None):
-    config = TransferConfig(multipart_chunksize=20 * 1024 * 1024)
-    with TransferManager(client, config) as manager:
-        future = manager.upload(
-            fileobj=infile,
-            bucket=bucket,
-            key=key,
-            extra_args=extra_args
-        )
-        yield future
-
-
-
-def upload_pipe(config, s3_key, data_cmd, mtime):
+def upload_pipe(data_cmd, s3_object, encryption_context, encryption_config):
     """Pipes the output of data_cmd into S3.
 
     Dataflow: data_cmd | lz4 | keypipe | s3
     """
 
-    # Client creation isn't thread-safe, so we do it in advance
-    s3 = boto3.client('s3')
+    credentials = get_creds_dict()
 
-    (encrypt_r, compress_w) = closeable_pipe()
-    (s3_r, encrypt_w) = closeable_pipe()
-    compressed_stream_f = (data_cmd | lz4 > compress_w) & BG
-    compress_w.close()
+    gof3r_cmd = s3gof3r[
+        'put',
+        '--no-md5',
+        '-b', s3_object.bucket_name,
+        '-k', s3_object.key,
+    ].with_env(**credentials)
 
-    encryption_thread = keypipe.seal_thread(
-        config['encryption']['provider'],
-        config['encryption']['args'],
-        encrypt_r,
-        encrypt_w,
+    context = serialize_context(encryption_context)
+    logger.debug("Invoking keypipe with context %s", context)
+
+    keypipe_partial = functools.partial(
+        keypipe.seal,
+        encryption_config['provider'],
+        encryption_config['args'],
+        context,
     )
 
-    #TODO: maybe use s3gof3r in lieu or addition
-    s3_fileobj = os.fdopen(s3_r, 'rb')
-    with s3_upload_future(
-        s3_fileobj,
-        s3,
-        config['s3']['bucket'],
-        s3_key,
-        extra_args=dict(Metadata={'Max-File-MTime': str(mtime)}),
-    ) as s3_future:
-        compressed_stream_f.wait()
+    (data_cmd | lz4 / keypipe_partial | gof3r_cmd) & FG
 
-        encryption_thread.join()
-        encrypt_r.close()
-        encrypt_w.close()
-
-        s3_future.result()
-    s3_r.close()
-
-
-def timed_upload_pipe(*args, **kwargs):
+def upload_sstable_component(
+    marker_info,
+    size,
+    data_cmd,
+    s3_object,
+    encryption_context,
+    encryption_config
+):
     start_time = time.time()
-    upload_pipe(*args, **kwargs)
+    elapsed = upload_pipe(
+        data_cmd,
+        s3_object,
+        encryption_context,
+        encryption_config,
+    )
     finish_time = time.time()
     elapsed = finish_time - start_time
-    return elapsed
+    speed = size / elapsed / 1024
+    logger.info('Uploaded to %s. %s bytes in %.3f seconds: %s KB/s',
+        s3_object.key,
+        size,
+        elapsed,
+        "{:,.2f}".format(speed)
+    )
+    timed_touch(*marker_info)
 
-def upload_sstable(config, upload_prefix, sstable):
+def merge_dicts(*args):
+    ret = {}
+    for d in args:
+        ret.update(d)
+    return ret
+
+def upload_sstable_immutable(config, identity, sstable, prefix, context, marker_dir):
+    marker = marker_dir / 'immutable'
+    if not marker.exists():
+        destination_key = '/'.join((prefix, 'immutable'))
+        destination = s3.Object(config['s3']['bucket'], destination_key)
+
+        files = sstable.get_immutable_files()
+        cmd, size, mtime = tar_stream_command(
+            sstable.path.dirname,
+            files,
+        )
+
+        upload_sstable_component(
+            (marker, mtime),
+            size,
+            cmd,
+            destination,
+            merge_dicts(context, dict(component='immutable')),
+            config['encryption']
+        )
+
+def upload_sstable_mutable(config, identity, sstable, prefix, context, marker_dir):
+    marker = marker_dir / 'mutable'
+
+    files = sstable.get_mutable_files()
+    cmd, size, mtime = tar_stream_command(
+        sstable.path.dirname,
+        files,
+    )
+
+    if (
+        not marker.exists() or
+        mtime > marker.stat().st_mtime_ns
+    ):
+        reversed_mtime = (1 << 64) - mtime
+        destination_key = '/'.join((
+            prefix,
+            'mutable',
+            '{:020}'.format(reversed_mtime)
+        ))
+        destination = s3.Object(config['s3']['bucket'], destination_key)
+
+        upload_sstable_component(
+            (marker, mtime),
+            size,
+            cmd,
+            destination,
+            merge_dicts(context, dict(component='mutable', timestamp=mtime)),
+            config['encryption'],
+        )
+
+    return mtime
+
+
+def upload_sstable(config, identity, upload_prefix, sstable):
     marker_dir = sstable.path.dirname.dirname / 'uploaded'
     marker_dir.mkdir()
+
+    context = dict(config['context'])
+    context.update(sstable.get_context())
+    context['identity'] = identity
 
     # the S3 prefix to be used by all uploaded components
     sstable_prefix = '/'.join((
@@ -249,59 +296,33 @@ def upload_sstable(config, upload_prefix, sstable):
         '{:010}'.format(sstable.generation),
     ))
 
-    immutable_marker = marker_dir / 'immutable'
-    if not immutable_marker.exists():
-        immutable_files = sstable.get_immutable_files()
-        upload_key = '/'.join((sstable_prefix, 'immutable'))
-        cmd, size, mtime = tar_stream_command(
-            sstable.path.dirname,
-            immutable_files,
-        )
-
-        timed_upload_pipe(config, upload_key, cmd, mtime)
-        immutable_marker.touch()
-
-    mutable_marker = marker_dir / 'mutable'
-    mutable_files = sstable.get_mutable_files()
-    cmd, size, mtime = tar_stream_command(
-        sstable.path.dirname,
-        mutable_files,
-    )
-    if (
-        not mutable_marker.exists() or
-        mtime > mutable_marker.stat().st_mtime_ns
-    ):
-        reversed_mtime = (1 << 64) - mtime
-        upload_key = '/'.join((
-            sstable_prefix,
-            'mutable',
-            '{:020}'.format(reversed_mtime)
-        ))
-
-        timed_upload_pipe(config, upload_key, cmd, mtime)
-        with NamedTemporaryFile(dir=mutable_marker.dirname) as f:
-            fd = f.fileno()
-            os.utime(f.name, ns=(mtime, mtime))
-            os.link(f.name, str(mutable_marker))
+    upload_sstable_immutable(config, identity, sstable, sstable_prefix, context, marker_dir)
+    mtime = upload_sstable_mutable(config, identity, sstable, sstable_prefix, context, marker_dir)
 
     return sstable.generation, mtime
 
 def actual_hardlink_sstable(sstable, state_path):
     state_path.dirname.mkdir()
-    temp_state_path = LocalPath(mkdtemp(
-        suffix='.',
-        dir=state_path.dirname,
-    ))
-    temp_state_path.chmod(0o750)
+    with MovingTemporaryDirectory(state_path) as d:
+        files = sstable.get_immutable_files()
 
-    files = sstable.get_immutable_files()
+        # This has the side-effect of ensuring that all files present in the TOC
+        # actually exist. Don't lose this property.
+        for f in files:
+            f.link(d.path / f.name)
 
-    # This has the side-effect of ensuring that all files present in the TOC
-    # actually exist. Don't lose this property.
-    for f in files:
-        f.link(temp_state_path / f.name)
+        d.path.chmod(0o750)
+        d.finalize()
 
-    temp_state_path.move(state_path)
+def stat_helper(path):
+    """os.path.exists will return None for PermissionError, leading us to
+    believe a file is not present when it, in fact, is. This is awful.
+    """
+
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
 
 def hardlink_sstable(state_dir, sstable):
     state_path = (
@@ -315,14 +336,17 @@ def hardlink_sstable(state_dir, sstable):
 
     for f in sstable.get_mutable_files():
         dest = state_path / f.name
+        stat = stat_helper(dest)
 
         # If the inodes no longer match, delete and replace the file.
-        if dest.stat().st_ino != f.stat().st_ino:
-            dest.unlink()
+        if stat is None or stat.st_ino != f.stat().st_ino:
+            try:
+                dest.unlink()
+            except FileNotFoundError:
+                pass
             f.link(dest)
 
     return SSTable.from_copied_toc(state_path / sstable.path.name)
-
 
 def actual_upload_manifest(bucket, prefix, sstable, tables):
     # S3 can only scan ascending. Since we usually want to start with the
@@ -353,18 +377,17 @@ def actual_upload_manifest(bucket, prefix, sstable, tables):
         Body=body,
     )
 
-def upload_manifest(bucket, dest_prefix, sstable, tables):
-    marker = sstable.path.dirname.dirname / 'manifest_uploaded'
+def upload_manifest(bucket, prefix, sstable, tables):
+    marker = sstable.path.dirname.dirname / 'uploaded' / 'manifest'
     if not marker.exists():
-        actual_upload_manifest(bucket, dest_prefix, sstable, tables)
+        actual_upload_manifest(bucket, prefix, sstable, tables)
+        marker.touch()
 
-    marker.touch()
-
-def backup_columnfamily(state_dir, config, cf_path):
+def backup_columnfamily(links_dir, config, identity, cf_path):
     """Performs backup of a single columnfamily."""
 
     linked_sstables = [
-        hardlink_sstable(state_dir, t)
+        hardlink_sstable(links_dir, t)
         for t in get_sstables_for_columnfamily(cf_path)
     ]
 
@@ -376,12 +399,12 @@ def backup_columnfamily(state_dir, config, cf_path):
     successive runs, and we would never upload a manifest file.
     """
 
-    upload_prefix = compute_destination_prefix(config, cf_path)
+    upload_prefix = compute_destination_prefix(config, identity, cf_path)
 
     # uploaded_sstables is a list of (generation, mtime) pairs that
     # upload_manifest can format into a manifest.
     uploaded_sstables = [
-        upload_sstable(config, upload_prefix, t)
+        upload_sstable(config, identity, upload_prefix, t)
         for t in linked_sstables
     ]
 
@@ -400,18 +423,25 @@ def backup_columnfamily(state_dir, config, cf_path):
             uploaded_sstables
         )
 
-def backup_all_sstables(config):
-    data_dir = LocalPath(config['data_dir'])
+def backup_all_sstables(config, state_dir):
+    links_dir = state_dir / 'links'
+
+    identity = get_identity(state_dir)
+    for cf_path in get_columnfamilies(data_dir):
+        backup_columnfamily(links_dir, config, identity, cf_path)
+
+def do_backup():
+    config_filename = os.path.expanduser('~/backups.yaml')
+    config = load_config(config_filename)
+    logging.basicConfig(stream=sys.stderr)
+    logger.setLevel(logging.DEBUG)
+
+    data_dir = LocalPath(config.get('data_dir', '/var/lib/cassandra'))
     state_dir = config.get('state_dir')
     state_dir = (
         LocalPath(state_dir) if state_dir is not None
         else data_dir / 'mirroring'
     )
+    state_dir.mkdir()
 
-    for cf_path in get_columnfamilies(data_dir):
-        backup_columnfamily(state_dir, config, cf_path)
-
-def do_backup():
-    config_filename = os.path.expanduser('~/backups.yaml')
-    config = load_config(config_filename)
-    backup_all_sstables(config)
+    backup_all_sstables(config, state_dir)

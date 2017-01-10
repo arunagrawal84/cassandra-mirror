@@ -9,7 +9,7 @@ setup(
     packages=find_packages(),
     entry_points=dict(
     console_scripts=[
-            'backup=cassandra_mirror.backup:backup',
+            'backup=cassandra_mirror.backup:do_backup',
             'restore=cassandra_mirror.restore:do_restore',
         ]
     ),
