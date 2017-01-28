@@ -8,7 +8,9 @@ Build-Depends:
   python3-dev,
   git,
   libffi-dev,
-  libssl-dev
+  libssl-dev,
+  libyaml-dev,
+  default-jdk
 
 Package: cassandra-mirror
 Architecture: amd64
