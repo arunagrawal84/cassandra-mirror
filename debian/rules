@@ -4,4 +4,4 @@
 	dh $@ --with python-virtualenv
 
 override_dh_virtualenv:
-	dh_virtualenv --python python3 --no-test --extra-pip-arg='--no-use-wheel'
+	dh_virtualenv --python python3 --no-test --extra-pip-arg='--no-use-wheel' --preinstall setuptools==34.1.0 --preinstall Cython==0.25.2
