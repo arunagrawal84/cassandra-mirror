@@ -1,4 +1,10 @@
-cassandra-mirror (0.0.1) UNRELEASED; urgency=medium
+cassandra-mirror (0.0.4) unstable; urgency=medium
+
+  * Fixes
+
+ -- Josh Snyder <josh@steampunk>  Sat, 28 Jan 2017 01:17:34 -0800
+
+cassandra-mirror (0.0.1) unstable; urgency=medium
 
   * Initial release.
 
