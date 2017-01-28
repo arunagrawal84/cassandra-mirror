@@ -1,9 +1,16 @@
 Source: cassandra-mirror
 Maintainer: Josh Snyder <josh.snyder@fitbit.com>
-Build-Depends: python-virtualenv
+Build-Depends:
+  python-virtualenv,
+  debhelper,
+  dh-virtualenv,
+  python3,
+  python3-dev,
+  git,
+  libffi-dev
 
 Package: cassandra-mirror
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, s3gof3r
 Description: mirrors data from Cassandra into other datastores
 
