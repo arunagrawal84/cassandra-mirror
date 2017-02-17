@@ -116,14 +116,9 @@ class SSTable(namedtuple('SSTable', 'path dirname keyspace cf_name cf_uuid versi
         return ret
 
     def construct_path(self, toc_entry):
-        name = '-'.join((
-            self.keyspace,
-            self.cf_name,
-            self.version,
-            str(self.generation),
-            toc_entry,
-        ))
-        return self.dirname / name
+        parts = str(self.path).split('-')[:-1]
+        parts.append(toc_entry)
+        return LocalPath('-'.join(parts))
 
     def get_immutable_files(self):
         return [
