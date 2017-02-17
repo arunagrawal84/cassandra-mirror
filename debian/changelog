@@ -1,3 +1,9 @@
+cassandra-mirror (0.0.7) unstable; urgency=medium
+
+  * Fix for secondary indexes
+
+ -- Josh Snyder <josh@steampunk>  Thu, 16 Feb 2017 18:28:59 -0800
+
 cassandra-mirror (0.0.6) unstable; urgency=medium
 
   * Use a JDK during the build step
