@@ -22,7 +22,6 @@ import boto3
 from .util import MovingTemporaryDirectory
 from .util import compute_top_prefix
 from .util import continuity_code
-from .util import get_creds_dict
 from .util import load_config
 from .util import serialize_context
 from .util import timed_touch
@@ -66,14 +65,12 @@ def download_to_path(
         context,
     )
 
-    credentials = get_creds_dict()
-
     gof3r_cmd = s3gof3r[
         'get',
         '--no-md5',
         '-b', s3_object.bucket_name,
         '-k', s3_object.key,
-    ].with_env(**credentials)
+    ]
 
     prefix = marker_path.name + '.'
 

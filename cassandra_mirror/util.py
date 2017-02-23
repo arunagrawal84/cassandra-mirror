@@ -34,17 +34,6 @@ def timed_touch(path, mtime):
             os.utime(f.fileno(), ns=(mtime, mtime))
             os.link(f.name, str(path))       
 
-@ttl_cache(ttl=1800)
-def get_creds_dict():
-    creds = boto3.Session().get_credentials()
-    creds_dict = dict(
-        AWS_ACCESS_KEY_ID=creds.access_key,
-        AWS_SECRET_ACCESS_KEY=creds.secret_key,
-    )
-    if creds.token is not None:
-        creds_dict['AWS_SESSION_TOKEN'] = creds.token
-    return creds_dict
-
 def compose(f):
     def wrapper(g):
         @functools.wraps(g)

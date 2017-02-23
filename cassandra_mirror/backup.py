@@ -26,7 +26,6 @@ from .obsoletion import cleanup_obsoleted
 from .obsoletion import mark_obsoleted
 
 from .util import MovingTemporaryDirectory
-from .util import get_creds_dict
 from .util import compute_top_prefix
 from .util import continuity_code
 from .util import load_config
@@ -168,14 +167,12 @@ def upload_pipe(data_cmd, s3_object, encryption_context, encryption_config):
     Dataflow: data_cmd | lz4 | keypipe | s3
     """
 
-    credentials = get_creds_dict()
-
     gof3r_cmd = s3gof3r[
         'put',
         '--no-md5',
         '-b', s3_object.bucket_name,
         '-k', s3_object.key,
-    ].with_env(**credentials)
+    ]
 
     context = serialize_context(encryption_context)
     logger.debug("Invoking keypipe with context %s", context)
