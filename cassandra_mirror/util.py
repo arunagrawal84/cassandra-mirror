@@ -42,7 +42,7 @@ def get_creds_dict():
         AWS_SECRET_ACCESS_KEY=creds.secret_key,
     )
     if creds.token is not None:
-        creds_dict['AWS_SECURITY_TOKEN'] = creds.token
+        creds_dict['AWS_SESSION_TOKEN'] = creds.token
     return creds_dict
 
 def compose(f):
