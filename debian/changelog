@@ -1,3 +1,9 @@
+cassandra-mirror (0.0.9) unstable; urgency=medium
+
+  * Stop mucking with AWS environment variables
+
+ -- Josh Snyder <josh@steampunk>  Thu, 23 Feb 2017 12:27:08 -0800
+
 cassandra-mirror (0.0.8) unstable; urgency=medium
 
   * Fix treatment of session tokens

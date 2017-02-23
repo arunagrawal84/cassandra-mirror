@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name='cassandra-mirror',
-    version='0.0.8',
+    version='0.0.9',
     author='Josh Snyder',
     author_email='josh.snyder@fitbit.com',
     packages=find_packages(),
