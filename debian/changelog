@@ -1,3 +1,9 @@
+cassandra-mirror (0.0.8) unstable; urgency=medium
+
+  * Fix treatment of session tokens
+
+ -- Josh Snyder <josh.snyder@fitbit.com>  Thu, 23 Feb 2017 11:59:08 -0800
+
 cassandra-mirror (0.0.7) unstable; urgency=medium
 
   * Fix for secondary indexes
