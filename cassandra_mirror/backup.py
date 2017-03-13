@@ -413,11 +413,10 @@ class Locations(namedtuple('Locations', 'data_dir sstables_dir state_dir links_d
     pass
 
 def do_backup():
-    config_filename = os.path.expanduser('~/backups.yaml')
-    config = load_config(config_filename)
     logging.basicConfig(stream=sys.stderr)
     logger.setLevel(logging.DEBUG)
 
+    config = load_config()
     data_dir = LocalPath(config.get('data_dir', '/var/lib/cassandra'))
     state_dir = config.get('state_dir')
     state_dir = (

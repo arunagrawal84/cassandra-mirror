@@ -16,9 +16,17 @@ import yaml
 # the project.
 continuity_code = 'dcb4246e-f8ac-400e-b005-61c751a75134'
 
-def load_config(path):
-    config_f = open(path, 'r')
+def _get_config_path():
+    config_filename = os.getenv('CASSANDRA_CONF', '/etc/cassandra')
+    config_path = LocalPath(config_filename) / 'mirroring.yaml'
+
+def _load_config_from_path(path):
+    config_f = path.open()
     return yaml.safe_load(config_f)
+
+def load_config()
+    path = _get_config_path()
+    return _load_config_from_path(path)
 
 _multipart_chunksize = 20 * 1024 * 1024
 

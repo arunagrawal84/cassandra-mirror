@@ -242,8 +242,7 @@ def copy_back(src, dst):
                 )
 
 def restore(identity):
-    config_filename = os.path.expanduser('~/backups.yaml')
-    config = load_config(config_filename)
+    config = load_config()
 
     s3 = boto3.resource('s3')
     bucket = s3.Bucket(config['s3']['bucket'])
