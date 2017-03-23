@@ -5,19 +5,29 @@ import time
 from .backup_helpers import is_sstable_toc
 from .backup_helpers import stat_helper
 
+def mark_cf_obsoleted(orig_cf, generation):
+    data_dir = generation / 'data'
+    obsolete_marker = generation / 'obsolete'
+    if stat_helper(sstable_data_dir) is None:
+        # We never successfully linked the sstable
+        obsolete_marker.touch()
+        return
+
+    tocs = list(filter(is_sstable_toc, generation / 'data'))
+    if len(tocs) != 1:
+        raise RuntimeError('Found {} TOCs in {}.'.format(len(tocs), str(generation)))
+    toc = tocs[0]
+    cassandra_toc = orig_cf / toc.name
+    if stat_helper(cassandra_toc) is None:
+        obsolete_marker.touch()
+
 def mark_obsoleted(locs):
     for ks in locs.links_dir:
         orig_ks = locs.sstables_dir / ks.name
         for cf_dir in ks:
             orig_cf = orig_ks / cf_dir.name
             for generation in cf_dir:
-                tocs = list(filter(is_sstable_toc, generation / 'data'))
-                if len(tocs) != 1:
-                    raise RuntimeError('Found {} TOCs in {}.'.format(len(tocs), str(cf_dir)))
-                toc = tocs[0]
-                cassandra_toc = orig_cf / toc.name
-                if stat_helper(cassandra_toc) is None:
-                    (generation / 'obsolete').touch()
+                mark_cf_obsoleted(orig_cf, generation)
 
 def maybe_delete_sstable_links(sstable_path, threshold):
     s = stat_helper(sstable_path / 'obsolete')
