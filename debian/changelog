@@ -1,3 +1,9 @@
+cassandra-mirror (0.0.11) unstable; urgency=medium
+
+  * fix for files that failed to link
+
+ -- Josh Snyder <josh@steampunk>  Fri, 24 Mar 2017 08:12:53 -0700
+
 cassandra-mirror (0.0.10) unstable; urgency=medium
 
   * modify how configuration files are looked up
