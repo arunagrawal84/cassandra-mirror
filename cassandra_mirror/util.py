@@ -5,7 +5,6 @@ from tempfile import NamedTemporaryFile
 from tempfile import TemporaryDirectory
 import os
 
-from cachetools.func import ttl_cache
 import boto3
 import json
 import yaml
@@ -99,12 +98,12 @@ class MovingTemporaryDirectory(TemporaryDirectory):
             pass
 
 
-def compute_top_prefix(config, identity):
+def compute_top_prefix(config):
     prefix = config['s3']['prefix_format'].format(**config['context'])
     return '/'.join((
         prefix,
-        'v1',
-        identity
+        'v2',
+        config['context']['identity']
     ))
 
 def serialize_context(o):

@@ -1,0 +1,13 @@
+---
+
+context:
+  cluster: mycluster
+  # identity (optional, default: node uuid queried via JMX)
+
+s3:
+  bucket: mybucket
+  # prefix_format is used with Python string formatting as
+  # prefix_format.format(**context)
+  # Use it to namespace your backups however you desire.
+  prefix_format: 'backups/cassandra/{cluster}'
+
