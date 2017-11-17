@@ -18,4 +18,7 @@ setup(
         'PyYAML>=3.12',
         'plumbum>=1.6.3',
     ],
+    dependency_links = [
+        'git+https://github.com/hashbrowncipher/plumbum.git@d57e53955536423857be87ec394e6eb376acaddf#egg=plumbum',
+    ]
 )

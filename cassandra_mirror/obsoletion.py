@@ -8,7 +8,7 @@ from .backup_helpers import stat_helper
 def mark_cf_obsoleted(orig_cf, generation):
     data_dir = generation / 'data'
     obsolete_marker = generation / 'obsolete'
-    if stat_helper(sstable_data_dir) is None:
+    if stat_helper(data_dir) is None:
         # We never successfully linked the sstable
         obsolete_marker.touch()
         return

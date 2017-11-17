@@ -9,6 +9,36 @@ import boto3
 import json
 import yaml
 
+from plumbum import local
+from plumbum.commands.processes import CommandNotFound
+gof3r = None
+try:
+    # local.get raises exceptions, violating Python norms of .get() not
+    # raising exceptions
+    gof3r = local.get('gof3r')
+except CommandNotFound:
+    pass
+
+s3 = boto3.resource('s3')
+
+# despite being class-like, s3.Object is not a class
+def S3Path(bucket_name, key):
+    self = s3.Object(bucket_name, key)
+    def _with_components(*components):
+        new_key = '/'.join((self.key,) + components)
+        return S3Path(self.bucket_name, new_key)
+
+    def _read_utf8():
+        return self.get()["Body"].read().decode("utf-8")
+
+    self.with_components = _with_components
+    self.read_utf8 = _read_utf8
+
+    return self
+
+def reverse_format_nanoseconds(ns):
+    return '{:016x}'.format((1 << 64) - ns)
+
 # This is incorporated into the encryption context, representing the program that uploaded the
 # file. The goal is to disambiguate the files produced by this utility from files produced by some
 # other utility. It is called a continuity code because it will remain the same for the life of
@@ -39,7 +69,7 @@ def timed_touch(path, mtime):
     except FileNotFoundError:
         with NamedTemporaryFile(dir=path.dirname) as f:
             os.utime(f.fileno(), ns=(mtime, mtime))
-            os.link(f.name, str(path))       
+            os.link(f.name, str(path))
 
 def compose(f):
     def wrapper(g):

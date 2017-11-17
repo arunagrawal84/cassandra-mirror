@@ -1,4 +1,5 @@
 from collections import namedtuple
+from io import BytesIO
 from subprocess import PIPE
 from tempfile import TemporaryDirectory
 import argparse
@@ -10,23 +11,25 @@ import os.path
 import sys
 import time
 
-import keypipe
 from concurrent import futures
 from concurrent.futures import ThreadPoolExecutor
 
-from keypipe.plumbum_helpers import ThreadCommand
+from plumbum import BG
 from plumbum import FG
 from plumbum import LocalPath
+from plumbum.commands.modifiers import PIPE
 import boto3
 
+from .util import S3Path
 from .util import MovingTemporaryDirectory
 from .util import compute_top_prefix
 from .util import continuity_code
+from .util import gof3r
 from .util import load_config
+from .util import reverse_format_nanoseconds
 from .util import serialize_context
 from .util import timed_touch
 
-from plumbum.cmd import s3gof3r
 from plumbum.cmd import lz4
 from plumbum.cmd import tar
 
@@ -44,10 +47,43 @@ def get_common_prefixes(bucket, prefix):
     for i in result.search('CommonPrefixes'):
         yield i['Prefix'][cut:-1]
 
-def get_columnfamilies(bucket, prefix):
-    for ks in get_common_prefixes(bucket, '{}/'.format(prefix)):
-        for cf in get_common_prefixes(bucket, '{}/{}/'.format(prefix, ks)):
-            yield ks, cf
+def get_manifest_entries(source, label):
+    source = source.with_components('manifests', label)
+    manifest = source.read_utf8()
+    for i in manifest.splitlines(keepends=False):
+        max_generation, ks_cf = i.split()
+        ks, cf = ks_cf.split('/')
+        yield ks, cf, max_generation
+
+def keypipe_cmd(provider_args, context):
+    import keypipe
+    from keypipe.plumbum_helpers import ThreadCommand
+    keypipe_partial = functools.partial(
+        keypipe.unseal,
+        provider_args,
+        context,
+    )
+
+    return ThreadCommand(keypipe_partial)
+
+def pipe():
+    (r, w) = os.pipe()
+    return BytesIO(r), BytesIO(w)
+
+
+def download_s3(cmd, s3_object):
+    if gof3r:
+        gof3r_cmd = s3gof3r[
+            'get',
+            '--no-md5',
+            '-b', s3_object.bucket_name,
+            '-k', s3_object.key,
+        ]
+        gof3r_cmd | cmd & FG
+    else:
+        with cmd.bgrun(stdin=PIPE) as future:
+            s3_object.download_fileobj(future.stdin)
+
 
 def download_to_path(
     marker_path,
@@ -59,30 +95,17 @@ def download_to_path(
     context = serialize_context(encryption_context)
     logger.debug("Invoking keypipe with context %s", context)
 
-    keypipe_partial = functools.partial(
-        keypipe.unseal,
-        provider_args,
-        context,
-    )
-
-    gof3r_cmd = s3gof3r[
-        'get',
-        '--no-md5',
-        '-b', s3_object.bucket_name,
-        '-k', s3_object.key,
-    ]
 
     prefix = marker_path.name + '.'
 
     with TemporaryDirectory(prefix=prefix, dir=destination.up()) as d:
         temp_destination = LocalPath(d)
+        cmd = lz4['-d'] | tar['-C', temp_destination, '-x']
+        if provider_args:
+            cmd = keypipe_cmd(provider_args, context) | cmd
+
         start_time = time.time()
-        (
-            gof3r_cmd /
-            keypipe_partial |
-            lz4['-d'] |
-            tar['-C', temp_destination, '-x']
-        ) & FG
+        download_s3(cmd, s3_object)
         finish_time = time.time()
         elapsed = finish_time - start_time
 
@@ -129,9 +152,11 @@ def download_sstable_to_path(
         """
         return
 
-    provider_args = {
-        config['encryption']['provider']: config['encryption']['args']
-    }
+    provider_args = None
+    if 'encryption' in config:
+        provider_args = {
+            config['encryption']['provider']: config['encryption']['args']
+        }
 
     uploaded_dir = path / 'uploaded'
     uploaded_dir.mkdir()
@@ -158,16 +183,11 @@ def download_sstable_to_path(
 
 ManifestEntry = namedtuple('ManifestEntry', 'generation, mtime')
 
-def get_sstables_to_download_for_cf(config, bucket, prefix, ks, cf):
-    for i in bucket.objects.filter(
-        Prefix='{}/{}/{}/manifest/'.format(prefix, ks, cf),
-    ).limit(1):
-        manifest_lines = i.get()['Body'].read().decode('utf8').splitlines()
 
-        return [
-            ManifestEntry(*line.split())
-            for line in manifest_lines
-        ]
+def get_sstables_to_download_for_cf(source, ks, cf, max_gen):
+    manifest = source.with_components('data', ks, cf, max_gen, 'manifest')
+    manifest_lines = manifest.read_utf8().splitlines(keepends=False)
+    return [ManifestEntry(*line.split()) for line in manifest_lines]
 
 def create_metadata_directories(sstables):
     for cf_dir, ks, cf, manifest_entries in sstables:
@@ -176,47 +196,52 @@ def create_metadata_directories(sstables):
         uploaded_dir.mkdir()
         (uploaded_dir / 'manifest').mkdir()
 
+def _get_sstable_download_instructions(
+    cf_dir,
+    source,
+    context,
+    entry,
+):
+    generation, mutable_mtime = entry
+    generation_dir = cf_dir / entry.generation
+    source = source.with_components(entry.generation)
+    context['generation'] = int(generation)
+
+    mutable_mtime = int(entry.mtime)
+    reversed_mtime = reverse_format_nanoseconds(mutable_mtime)
+
+    objects = (
+        ('mutable', source.with_components('mutable', reversed_mtime)),
+        ('immutable', source.with_components('immutable')),
+    )
+
+    return generation_dir, objects, context, mutable_mtime
+
 def _get_download_instructions_for_cf(
     identity,
-    bucket,
-    prefix,
-    sstable
+    source,
+    sstable,
 ):
     cf_dir, ks, cf, manifest_entries = sstable
+    source = source.with_components('data', ks, cf)
+    context = dict(
+        identity=identity,
+        keyspace=ks,
+        columnfamily=cf,
+    )
+
     for entry in manifest_entries:
-        generation, mutable_mtime = entry
-        generation_dir = cf_dir / generation
-        sstable_prefix = '{}/{}/{}/data/{}'.format(prefix, ks, cf, generation)
-
-        mutable_mtime = int(mutable_mtime)
-        reversed_mtime = (1<<64) - mutable_mtime
-
-        context = dict(
-            identity=identity,
-            keyspace=ks,
-            columnfamily=cf,
-            generation=int(generation),
+        yield _get_sstable_download_instructions(
+            cf_dir, source, dict(context), entry
         )
 
-        objects = (
-            ('mutable', bucket.Object('{}/mutable/{:020}'.format(
-                sstable_prefix,
-                reversed_mtime
-            ))),
-            ('immutable', bucket.Object('{}/immutable'.format(
-                sstable_prefix
-            ))),
-        )
-
-        yield generation_dir, objects, context, mutable_mtime
-
-def get_download_instructions(identity, bucket, prefix, sstables):
+def get_download_instructions(identity, source, sstables):
     for i in sstables:
-        yield from _get_download_instructions_for_cf(identity, bucket, prefix, i)
+        yield from _get_download_instructions_for_cf(identity, source, i)
 
-def get_sstables_to_download(config, bucket, prefix):
-    for ks, cf in get_columnfamilies(bucket, prefix):
-        tables = get_sstables_to_download_for_cf(config, bucket, prefix, ks, cf)
+def get_sstables_to_download(source, label):
+    for ks, cf, max_gen in get_manifest_entries(source, label):
+        tables = get_sstables_to_download_for_cf(source, ks, cf, max_gen)
         yield ks, cf, tables
 
 def compute_cf_dirs(base, sstables):
@@ -241,21 +266,21 @@ def copy_back(src, dst):
                     dst
                 )
 
-def restore(identity):
+def restore(identity, manifest_label, workers):
     config = load_config()
 
     s3 = boto3.resource('s3')
-    bucket = s3.Bucket(config['s3']['bucket'])
-    prefix = compute_top_prefix(config, identity)
+    source = S3Path(config['s3']['bucket'], compute_top_prefix(config))
 
-    i = get_sstables_to_download(config, bucket, prefix)
+    i = get_sstables_to_download(source, manifest_label)
     sstables = list(compute_cf_dirs(LocalPath('mirrored'), i))
 
     create_metadata_directories(sstables)
-    instructions = get_download_instructions(identity, bucket, prefix, sstables)
+    instructions = get_download_instructions(identity, source, sstables)
 
-    # It is assumed we'll be disk-bound, so I've chosen a typical disk queue depth.
-    with futures.ThreadPoolExecutor(max_workers=32) as executor:
+    # It is assumed we'll be disk-bound, so I've chosen a typical disk queue
+    # depth.
+    with futures.ThreadPoolExecutor(workers) as executor:
         fs = [
             executor.submit(download_sstable_to_path, config, *i)
             for i in instructions
@@ -279,9 +304,12 @@ def do_restore():
     parser = argparse.ArgumentParser(
         description='Restore a Cassandra backup into the current working directory.'
     )
+    parser.add_argument('--workers', '-w', type=int, default=32)
     parser.add_argument('source_identity',
         help='The identity (typically UUID) of the node whose backup should be restored'
     )
+    parser.add_argument('manifest_label', nargs='?')
+
     args = parser.parse_args()
 
     logging.basicConfig(stream=sys.stderr)
@@ -291,7 +319,7 @@ def do_restore():
         logger.info('Skipping restoration because a data directory already exists')
         return
 
-    restore(args.source_identity)
+    restore(args.source_identity, args.manifest_label, args.workers)
 
 if __name__ == '__main__':
     sys.exit(do_restore())
