@@ -18,7 +18,6 @@ from .backup_helpers import stat_helper
 from .obsoletion import cleanup_obsoleted
 from .obsoletion import mark_obsoleted
 from .util import MovingTemporaryDirectory
-from .util import S3Path
 from .util import compute_top_prefix
 from .util import continuity_code
 from .util import gof3r
@@ -30,7 +29,6 @@ from .util import timed_touch
 from plumbum.cmd import lz4
 from plumbum.cmd import tar
 logger = logging.getLogger(__name__)
-
 
 # A recursive directory walker
 def find(path, depth):
@@ -420,8 +418,8 @@ def upload_global_manifest(columnfamilies, destination):
     # the newest backup sorts lexicographically lowest.
     t = time.time()
     t_string = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
-    ns_since_epoch = int(time.time() * 1e9)
-    label = '{:016x} {}'.format(reverse_format_nanoseconds(ns_since_epoch), t_string)
+    ns_since_epoch = time.time() * 1e9
+    label = '{} {}'.format(reverse_format_nanoseconds(ns_since_epoch), t_string)
 
     destination = destination.with_components('manifests', label)
     body = transform_cf_for_manifest(columnfamilies)
@@ -463,7 +461,7 @@ def do_backup():
     locs = Locations(data_dir, data_dir / 'data', state_dir, state_dir / 'links')
     fix_identity(config, locs)
 
-    destination = S3Path(config['s3']['bucket'], compute_top_prefix(config))
+    destination = compute_top_prefix(config)
     cf_specs = backup_all_sstables(config, locs, destination)
     label = upload_global_manifest(cf_specs, destination)
     print(label)

@@ -31,13 +31,22 @@ def S3Path(bucket_name, key):
     def _read_utf8():
         return self.get()["Body"].read().decode("utf-8")
 
+    def _descendants(start=None):
+        args = dict(Prefix=key + '/')
+        if start is not None:
+            args['Marker'] = '{}/{}'.format(key, start)
+
+        return s3.Bucket(bucket_name).objects.filter(**args)
+
+
     self.with_components = _with_components
     self.read_utf8 = _read_utf8
+    self.descendants = _descendants
 
     return self
 
 def reverse_format_nanoseconds(ns):
-    return '{:016x}'.format((1 << 64) - ns)
+    return '{:016x}'.format((1 << 64) - int(ns))
 
 # This is incorporated into the encryption context, representing the program that uploaded the
 # file. The goal is to disambiguate the files produced by this utility from files produced by some
@@ -127,14 +136,14 @@ class MovingTemporaryDirectory(TemporaryDirectory):
             # so that __exit__ does not complain
             pass
 
-
 def compute_top_prefix(config):
     prefix = config['s3']['prefix_format'].format(**config['context'])
-    return '/'.join((
+    key = '/'.join((
         prefix,
         'v2',
         config['context']['identity']
     ))
+    return S3Path(config['s3']['bucket'], key)
 
 def serialize_context(o):
     return json.dumps(o, sort_keys=True).encode('ascii')

@@ -20,7 +20,6 @@ from plumbum import LocalPath
 from plumbum.commands.modifiers import PIPE
 import boto3
 
-from .util import S3Path
 from .util import MovingTemporaryDirectory
 from .util import compute_top_prefix
 from .util import continuity_code
@@ -46,14 +45,6 @@ def get_common_prefixes(bucket, prefix):
     )
     for i in result.search('CommonPrefixes'):
         yield i['Prefix'][cut:-1]
-
-def get_manifest_entries(source, label):
-    source = source.with_components('manifests', label)
-    manifest = source.read_utf8()
-    for i in manifest.splitlines(keepends=False):
-        max_generation, ks_cf = i.split()
-        ks, cf = ks_cf.split('/')
-        yield ks, cf, max_generation
 
 def keypipe_cmd(provider_args, context):
     import keypipe
@@ -95,7 +86,6 @@ def download_to_path(
     context = serialize_context(encryption_context)
     logger.debug("Invoking keypipe with context %s", context)
 
-
     prefix = marker_path.name + '.'
 
     with TemporaryDirectory(prefix=prefix, dir=destination.up()) as d:
@@ -134,15 +124,20 @@ def download_to_path(
             i.link(destination / i.name)
 
 
-
 def download_sstable_to_path(
     config,
-    path,
-    objects,
-    sstable_context,
-    mutable_mtime
+    dest,
+    sstable,
 ):
-    if (path / 'data').exists():
+    ks, cf, gen, mtime = sstable
+    dest = dest / ks / cf / gen
+
+    sstable_context = dict(config['context'])
+    sstable_context['keyspace'] = ks
+    sstable_context['columnfamily'] = cf
+    sstable_context['generation'] = int(gen)
+
+    if (dest / 'data').exists():
         """Note that we use the existence of a directory named 'data' to
         inhibit downloads. This stands in contrast to uploads, which we inhibit
         with separate marker files.
@@ -158,17 +153,23 @@ def download_sstable_to_path(
             config['encryption']['provider']: config['encryption']['args']
         }
 
-    uploaded_dir = path / 'uploaded'
+    uploaded_dir = dest / 'uploaded'
     uploaded_dir.mkdir()
 
-    with MovingTemporaryDirectory(path / 'data') as temp:
+    reversed_mtime = reverse_format_nanoseconds(mtime)
+
+    objects = (
+        ('mutable', source.with_components('mutable', reversed_mtime)),
+        ('immutable', source.with_components('immutable')),
+    )
+
+    with MovingTemporaryDirectory(dest / 'data') as temp:
         for (marker_name, s3_object) in objects:
             context = dict(sstable_context)
-            context.update(config['context'])
             context['component'] = marker_name
             context['continuity'] = continuity_code
             if marker_name == 'mutable':
-                context['timestamp'] = mutable_mtime
+                context['timestamp'] = mtime
 
             marker_path = uploaded_dir / marker_name
             download_to_path(
@@ -181,68 +182,49 @@ def download_sstable_to_path(
 
         temp.finalize()
 
-ManifestEntry = namedtuple('ManifestEntry', 'generation, mtime')
+def create_manifest_markers(sources, dest):
+    """Creates the files indicating that a manifest was uploaded for this
+    generation. By doing so, we inhibit future manifests for being uploaded for
+    this generation."""
 
-
-def get_sstables_to_download_for_cf(source, ks, cf, max_gen):
-    manifest = source.with_components('data', ks, cf, max_gen, 'manifest')
-    manifest_lines = manifest.read_utf8().splitlines(keepends=False)
-    return [ManifestEntry(*line.split()) for line in manifest_lines]
-
-def create_metadata_directories(sstables):
-    for cf_dir, ks, cf, manifest_entries in sstables:
-        last_entry = manifest_entries[-1]
-        uploaded_dir = (cf_dir / last_entry.generation / 'uploaded')
+    for ks, cf, gen in sources:
+        uploaded_dir = dest / ks / cf / gen / 'uploaded'
         uploaded_dir.mkdir()
-        (uploaded_dir / 'manifest').mkdir()
+        (uploaded_dir / 'manifest').touch()
 
-def _get_sstable_download_instructions(
-    cf_dir,
-    source,
-    context,
-    entry,
-):
-    generation, mutable_mtime = entry
-    generation_dir = cf_dir / entry.generation
-    source = source.with_components(entry.generation)
-    context['generation'] = int(generation)
+"""
+Hierarchical Manifest Layout
 
-    mutable_mtime = int(entry.mtime)
-    reversed_mtime = reverse_format_nanoseconds(mutable_mtime)
+A global manifest points to individual columnfamilies, each with a maximum
+generation.  Each generation points to its own data files. Too, its manifest
+references zero or more other generations. The CF manifests are not transitive:
+we do not consult the manifest of any generation other than the maximum one.
 
-    objects = (
-        ('mutable', source.with_components('mutable', reversed_mtime)),
-        ('immutable', source.with_components('immutable')),
-    )
+Manifest (manifests/<label>)
+|_ CF Manifests (data/<ks>/<cf>/<gen>/manifest)
+   |_ Generations (data/<ks>/<cf>/<gen>)
+      |_ Immutable component (data/<ks>/<cf>/<gen>/immutable)
+      |_ Mutable component (data/<ks>/<cf>/<gen>/mutable/<mtime>)
+"""
 
-    return generation_dir, objects, context, mutable_mtime
+def _get_global_manifest_entries(source, label):
+    source = source.with_components('manifests', label)
+    for i in source.read_utf8().splitlines(keepends=False):
+        max_generation, ks_cf = i.split()
+        ks, cf = ks_cf.split('/')
+        yield ks, cf, max_generation
 
-def _get_download_instructions_for_cf(
-    identity,
-    source,
-    sstable,
-):
-    cf_dir, ks, cf, manifest_entries = sstable
-    source = source.with_components('data', ks, cf)
-    context = dict(
-        identity=identity,
-        keyspace=ks,
-        columnfamily=cf,
-    )
+def _spider_global_manifest_entries(source, entries):
+    source = source.with_components('data')
+    for ks, cf, max_gen in entries:
+        manifest = source.with_components(ks, cf, max_gen, 'manifest')
+        for l in manifest.read_utf8().splitlines(keepends=False):
+            gen, mtime = l.split()
+            yield ks, cf, gen, mtime
 
-    for entry in manifest_entries:
-        yield _get_sstable_download_instructions(
-            cf_dir, source, dict(context), entry
-        )
-
-def get_download_instructions(identity, source, sstables):
-    for i in sstables:
-        yield from _get_download_instructions_for_cf(identity, source, i)
-
-def get_sstables_to_download(source, label):
-    for ks, cf, max_gen in get_manifest_entries(source, label):
-        tables = get_sstables_to_download_for_cf(source, ks, cf, max_gen)
-        yield ks, cf, tables
+def get_generations_referenced_by_manifest(source, label):
+    entries = _get_global_manifest_entries(source, label)
+    return _spider_global_manifest_entries(source, entries)
 
 def compute_cf_dirs(base, sstables):
     for ks, cf, entries in sstables:
@@ -270,20 +252,18 @@ def restore(identity, manifest_label, workers):
     config = load_config()
 
     s3 = boto3.resource('s3')
-    source = S3Path(config['s3']['bucket'], compute_top_prefix(config))
+    source = compute_top_prefix(config)
+    manifest_entries = list(_get_global_manifest_entries(source, label))
 
-    i = get_sstables_to_download(source, manifest_label)
-    sstables = list(compute_cf_dirs(LocalPath('mirrored'), i))
+    dest = LocalPath('mirrored')
+    create_manifest_markers(manifest_entries, dest)
 
-    create_metadata_directories(sstables)
-    instructions = get_download_instructions(identity, source, sstables)
+    sstables = _spider_global_manifest_entries(source, manifest_entries)
 
-    # It is assumed we'll be disk-bound, so I've chosen a typical disk queue
-    # depth.
     with futures.ThreadPoolExecutor(workers) as executor:
         fs = [
-            executor.submit(download_sstable_to_path, config, *i)
-            for i in instructions
+            executor.submit(download_sstable_to_path, config, dest, sstable)
+            for sstable in sstables
         ]
         for f in futures.as_completed(fs):
             try:

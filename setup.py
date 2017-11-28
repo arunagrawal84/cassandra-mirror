@@ -11,6 +11,7 @@ setup(
         console_scripts=[
             'backup=cassandra_mirror.backup:do_backup',
             'restore=cassandra_mirror.restore:do_restore',
+            'prune=cassandra_mirror.prune:do_prune',
         ]
     ),
     install_requires=[
