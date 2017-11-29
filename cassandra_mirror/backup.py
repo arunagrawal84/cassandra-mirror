@@ -1,4 +1,7 @@
 from collections import namedtuple
+from fcntl import flock
+from fcntl import LOCK_EX
+from fcntl import LOCK_NB
 from io import BytesIO
 from operator import attrgetter
 import functools
@@ -17,6 +20,7 @@ from .backup_helpers import is_sstable_toc
 from .backup_helpers import stat_helper
 from .obsoletion import cleanup_obsoleted
 from .obsoletion import mark_obsoleted
+from .prune import prune
 from .util import MovingTemporaryDirectory
 from .util import compute_top_prefix
 from .util import continuity_code
@@ -412,7 +416,7 @@ def transform_cf_for_manifest(cfs):
     buf.seek(0)
     return buf
 
-def upload_global_manifest(columnfamilies, destination):
+def upload_global_manifest(columnfamilies, destination, marker_dir):
     # S3 can only scan ascending. Since we usually want to start with the
     # newest backup and work backward, we'll format the string so that
     # the newest backup sorts lexicographically lowest.
@@ -420,6 +424,7 @@ def upload_global_manifest(columnfamilies, destination):
     t_string = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
     ns_since_epoch = time.time() * 1e9
     label = '{} {}'.format(reverse_format_nanoseconds(ns_since_epoch), t_string)
+    (marker_dir / label).touch()
 
     destination = destination.with_components('manifests', label)
     body = transform_cf_for_manifest(columnfamilies)
@@ -458,13 +463,20 @@ def do_backup():
     )
     state_dir.mkdir()
 
+    lock_fh = (state_dir / 'lock').open('w')
+    flock(lock_fh.fileno(), LOCK_EX | LOCK_NB)
+
     locs = Locations(data_dir, data_dir / 'data', state_dir, state_dir / 'links')
     fix_identity(config, locs)
 
     destination = compute_top_prefix(config)
     cf_specs = backup_all_sstables(config, locs, destination)
-    label = upload_global_manifest(cf_specs, destination)
+
+    marker_dir = (state_dir / 'manifests')
+    marker_dir.mkdir()
+    label = upload_global_manifest(cf_specs, destination, marker_dir)
     print(label)
+    prune(destination, config['ttl'], marker_dir, 8)
 
     mark_obsoleted(locs)
     cleanup_obsoleted(locs, 0)
