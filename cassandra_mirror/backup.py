@@ -424,6 +424,11 @@ def upload_global_manifest(columnfamilies, destination, marker_dir):
     t_string = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
     ns_since_epoch = time.time() * 1e9
     label = '{} {}'.format(reverse_format_nanoseconds(ns_since_epoch), t_string)
+
+    # Unlike every other marker file, we touch this one _ahead_ of actually
+    # completing the operation. That's because this marker file doesn't
+    # actually inhibit an upload. Instead it serves to tell the prune script
+    # that this backup deserves to be/remain in S3.
     (marker_dir / label).touch()
 
     destination = destination.with_components('manifests', label)
