@@ -6,8 +6,7 @@ from botocore.exceptions import ClientError
 import boto3
 
 from .restore import get_sstable_objects
-from .restore import get_global_manifest_entries
-from .restore import spider_global_manifest_entries
+from .restore import get_sstables_for_labels
 
 from .util import compute_top_prefix
 from .util import load_config
@@ -34,12 +33,7 @@ def check(labels):
     s3 = boto3.resource('s3')
     source = compute_top_prefix(config)
 
-    entries = set()
-    for label in labels:
-        logger.info('Spidering label: %s', label)
-        entries.update(get_global_manifest_entries(source, label))
-
-    sstables = set(spider_global_manifest_entries(source, entries))
+    sstables = get_sstables_for_labels(source, labels)
 
     objects = set()
     for s in sstables:

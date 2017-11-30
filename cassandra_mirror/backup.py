@@ -459,17 +459,17 @@ def do_backup():
     # no state directory to rely upon.
     fix_identity(config, locs)
 
-    if not data_dir.exists():
+    if not locs.data_dir.exists():
         raise RuntimeException('data_dir does not exist')
 
-    state_dir.mkdir()
-    lock_fh = (state_dir / 'lock').open('w')
+    locs.state_dir.mkdir()
+    lock_fh = (locs.state_dir / 'lock').open('w')
     flock(lock_fh.fileno(), LOCK_EX | LOCK_NB)
 
     destination = compute_top_prefix(config)
     cf_specs = backup_all_sstables(config, locs, destination)
 
-    marker_dir = (state_dir / 'manifests')
+    marker_dir = (locs.state_dir / 'manifests')
     marker_dir.mkdir()
     label = upload_global_manifest(cf_specs, destination, marker_dir)
     print(label)

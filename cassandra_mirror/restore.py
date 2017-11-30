@@ -63,6 +63,7 @@ def pipe():
 
 
 def download_s3(cmd, s3_object):
+    logger.info('Downloading %s', s3_object.key)
     if gof3r:
         gof3r_cmd = s3gof3r[
             'get',
@@ -74,7 +75,7 @@ def download_s3(cmd, s3_object):
     else:
         with cmd.bgrun(stdin=PIPE) as future:
             s3_object.download_fileobj(future.stdin)
-
+            future.stdin.close()
 
 def download_to_path(
     marker_path,
@@ -169,7 +170,7 @@ def download_sstable_to_path(
     uploaded_dir.mkdir()
 
     with MovingTemporaryDirectory(dest / 'data') as temp:
-        for (marker_name, s3_object) in get_sstable_objects(source, ssstable):
+        for (marker_name, s3_object) in get_sstable_objects(source, sstable):
             context = dict(sstable_context)
             context['component'] = marker_name
             context['continuity'] = continuity_code
@@ -212,14 +213,14 @@ Manifest (manifests/<label>)
       |_ Mutable component (data/<ks>/<cf>/<gen>/mutable/<mtime>)
 """
 
-def get_global_manifest_entries(source, label):
+def _get_global_manifest_entries(source, label):
     source = source.with_components('manifests', label)
     for i in source.read_utf8().splitlines(keepends=False):
         max_generation, ks_cf = i.split()
         ks, cf = ks_cf.split('/')
         yield ks, cf, max_generation
 
-def spider_global_manifest_entries(source, entries):
+def _spider_global_manifest_entries(source, entries):
     source = source.with_components('data')
     for ks, cf, max_gen in entries:
         manifest = source.with_components(ks, cf, max_gen, 'manifest')
@@ -227,6 +228,15 @@ def spider_global_manifest_entries(source, entries):
         for l in manifest.read_utf8().splitlines(keepends=False):
             gen, mtime = l.split()
             yield ks, cf, gen, mtime
+
+def get_sstables_for_labels(source, labels):
+    entries = set()
+    for label in labels:
+        logger.info('Spidering label: %s', label)
+        entries.update(_get_global_manifest_entries(source, label))
+
+    sstables = set(_spider_global_manifest_entries(source, entries))
+    return sstables
 
 def compute_cf_dirs(base, sstables):
     for ks, cf, entries in sstables:
@@ -250,17 +260,17 @@ def copy_back(src, dst):
                     dst
                 )
 
-def restore(identity, manifest_label, workers):
+def restore(identity, label, workers):
     config, locs = load_config()
 
     s3 = boto3.resource('s3')
     source = compute_top_prefix(config)
-    manifest_entries = list(get_global_manifest_entries(source, label))
+    manifest_entries = list(_get_global_manifest_entries(source, label))
 
-    dest = LocalPath('mirrored')
+    dest = LocalPath('mirroring/links')
     create_manifest_markers(manifest_entries, dest)
 
-    sstables = spider_global_manifest_entries(source, manifest_entries)
+    sstables = _spider_global_manifest_entries(source, manifest_entries)
 
     with futures.ThreadPoolExecutor(workers) as executor:
         fs = [
@@ -280,7 +290,7 @@ def restore(identity, manifest_label, workers):
                 raise
 
     with MovingTemporaryDirectory(LocalPath('data')) as d:
-        copy_back(LocalPath('mirrored'), d.path)
+        copy_back(dest, d.path)
         d.finalize()
 
 def do_restore():
@@ -291,7 +301,9 @@ def do_restore():
     parser.add_argument('source_identity',
         help='The identity (typically UUID) of the node whose backup should be restored'
     )
-    parser.add_argument('manifest_label', nargs='?')
+    parser.add_argument('manifest_label',
+        help='The label of the backup to restore',
+    )
 
     args = parser.parse_args()
 

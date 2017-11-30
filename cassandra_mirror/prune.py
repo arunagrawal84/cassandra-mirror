@@ -7,7 +7,7 @@ from time import time
 
 import boto3
 
-from .restore import get_generations_referenced_by_manifest
+from .restore import get_sstables_for_labels
 from .util import compute_top_prefix
 from .util import load_config
 from .util import reverse_format_nanoseconds
@@ -78,10 +78,8 @@ def prune(source, ttl, marker_dir, label_threshold):
 
     generations_to_keep = set()
 
-    for label in labels_to_keep:
-        for i in get_generations_referenced_by_manifest(source, label):
-            ks, cf, gen, _ = i
-            generations_to_keep.add((ks, cf, gen))
+    for ks, cf, gen, _ in get_sstables_for_labels(source, labels_to_keep):
+        generations_to_keep.add((ks, cf, gen))
 
     delete_manifests(source, labels_to_keep, prune_before)
     delete_data(source, generations_to_keep)
