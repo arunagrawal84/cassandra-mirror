@@ -58,7 +58,12 @@ def verify_labels_is_comprehensive(source, labels_to_keep, grace_after):
             break
 
         if label not in labels_to_keep:
-            raise RuntimeError('List of labels to keep does not cover the grace period')
+            # If an instance is replaced more frequently than the backup ttl,
+            # it will never purge its backups. The way to fix this would be to,
+            # for each manifest, also upload a list of the other manifests that
+            # were present at the time of the backup.
+            raise RuntimeError(
+                'List of labels to keep does not cover the grace period')
 
 def prune(source, ttl, marker_dir, label_threshold):
     label_files = marker_dir.list()
