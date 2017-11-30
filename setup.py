@@ -11,14 +11,12 @@ setup(
         console_scripts=[
             'backup=cassandra_mirror.backup:do_backup',
             'restore=cassandra_mirror.restore:do_restore',
+            'check=cassandra_mirror.check:do_check',
         ]
     ),
     install_requires=[
         'boto3>=1.4.2',
         'PyYAML>=3.12',
-        'plumbum>=1.6.3',
+        'plumbum>=1.6.4',
     ],
-    dependency_links = [
-        'git+https://github.com/hashbrowncipher/plumbum.git@d57e53955536423857be87ec394e6eb376acaddf#egg=plumbum',
-    ]
 )

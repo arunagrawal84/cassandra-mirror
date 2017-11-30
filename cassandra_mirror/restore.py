@@ -123,9 +123,21 @@ def download_to_path(
         for i in temp_destination:
             i.link(destination / i.name)
 
+def get_sstable_objects(source, sstable):
+    ks, cf, gen, mtime = sstable
+    source = source.with_components('data', ks, cf, gen)
+    reversed_mtime = reverse_format_nanoseconds(mtime)
+
+    objects = (
+        ('mutable', source.with_components('mutable', reversed_mtime)),
+        ('immutable', source.with_components('immutable')),
+    )
+
+    return objects
 
 def download_sstable_to_path(
     config,
+    source,
     dest,
     sstable,
 ):
@@ -156,15 +168,8 @@ def download_sstable_to_path(
     uploaded_dir = dest / 'uploaded'
     uploaded_dir.mkdir()
 
-    reversed_mtime = reverse_format_nanoseconds(mtime)
-
-    objects = (
-        ('mutable', source.with_components('mutable', reversed_mtime)),
-        ('immutable', source.with_components('immutable')),
-    )
-
     with MovingTemporaryDirectory(dest / 'data') as temp:
-        for (marker_name, s3_object) in objects:
+        for (marker_name, s3_object) in get_sstable_objects(source, ssstable):
             context = dict(sstable_context)
             context['component'] = marker_name
             context['continuity'] = continuity_code
@@ -207,24 +212,21 @@ Manifest (manifests/<label>)
       |_ Mutable component (data/<ks>/<cf>/<gen>/mutable/<mtime>)
 """
 
-def _get_global_manifest_entries(source, label):
+def get_global_manifest_entries(source, label):
     source = source.with_components('manifests', label)
     for i in source.read_utf8().splitlines(keepends=False):
         max_generation, ks_cf = i.split()
         ks, cf = ks_cf.split('/')
         yield ks, cf, max_generation
 
-def _spider_global_manifest_entries(source, entries):
+def spider_global_manifest_entries(source, entries):
     source = source.with_components('data')
     for ks, cf, max_gen in entries:
         manifest = source.with_components(ks, cf, max_gen, 'manifest')
+        logger.info("Spidering manifest: %s", manifest.key)
         for l in manifest.read_utf8().splitlines(keepends=False):
             gen, mtime = l.split()
             yield ks, cf, gen, mtime
-
-def get_generations_referenced_by_manifest(source, label):
-    entries = _get_global_manifest_entries(source, label)
-    return _spider_global_manifest_entries(source, entries)
 
 def compute_cf_dirs(base, sstables):
     for ks, cf, entries in sstables:
@@ -249,20 +251,21 @@ def copy_back(src, dst):
                 )
 
 def restore(identity, manifest_label, workers):
-    config = load_config()
+    config, locs = load_config()
 
     s3 = boto3.resource('s3')
     source = compute_top_prefix(config)
-    manifest_entries = list(_get_global_manifest_entries(source, label))
+    manifest_entries = list(get_global_manifest_entries(source, label))
 
     dest = LocalPath('mirrored')
     create_manifest_markers(manifest_entries, dest)
 
-    sstables = _spider_global_manifest_entries(source, manifest_entries)
+    sstables = spider_global_manifest_entries(source, manifest_entries)
 
     with futures.ThreadPoolExecutor(workers) as executor:
         fs = [
-            executor.submit(download_sstable_to_path, config, dest, sstable)
+            executor.submit(download_sstable_to_path, config, source, dest,
+                sstable)
             for sstable in sstables
         ]
         for f in futures.as_completed(fs):

@@ -444,30 +444,22 @@ def backup_all_sstables(config, locs, destination):
         for p in cf_paths
     ]
 
-class Locations(namedtuple('Locations', 'data_dir sstables_dir state_dir links_dir')):
-    pass
-
 def do_backup():
     logging.basicConfig(stream=sys.stderr)
     logger.setLevel(logging.DEBUG)
 
-    config = load_config()
-    data_dir = LocalPath(config.get('data_dir', '/var/lib/cassandra'))
+    config, locs = load_config()
+
+    # fix_identity is only relevant for backup. For other code paths there is
+    # no state directory to rely upon.
+    fix_identity(config, locs)
+
     if not data_dir.exists():
         raise RuntimeException('data_dir does not exist')
 
-    state_dir = config.get('state_dir')
-    state_dir = (
-        LocalPath(state_dir) if state_dir is not None
-        else data_dir / 'mirroring'
-    )
     state_dir.mkdir()
-
     lock_fh = (state_dir / 'lock').open('w')
     flock(lock_fh.fileno(), LOCK_EX | LOCK_NB)
-
-    locs = Locations(data_dir, data_dir / 'data', state_dir, state_dir / 'links')
-    fix_identity(config, locs)
 
     destination = compute_top_prefix(config)
     cf_specs = backup_all_sstables(config, locs, destination)

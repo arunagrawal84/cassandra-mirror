@@ -1,3 +1,4 @@
+from collections import namedtuple
 from contextlib import contextmanager
 
 from plumbum.path import LocalPath
@@ -62,9 +63,24 @@ def _load_config_from_path(path):
     config_f = path.open()
     return yaml.safe_load(config_f)
 
+class Locations(namedtuple('Locations', 'data_dir sstables_dir state_dir links_dir')):
+    pass
+
+def _make_locations(config):
+    data_dir = LocalPath(config.get('data_dir', '/var/lib/cassandra'))
+    state_dir = config.get('state_dir')
+    state_dir = (
+        LocalPath(state_dir) if state_dir is not None
+        else data_dir / 'mirroring'
+    )
+    return Locations(data_dir, data_dir / 'data', state_dir,
+	    state_dir / 'links')
+
 def load_config():
     path = _get_config_path()
-    return _load_config_from_path(path)
+    config = _load_config_from_path(path)
+    locs = _make_locations(config)
+    return config, locs
 
 _multipart_chunksize = 20 * 1024 * 1024
 
