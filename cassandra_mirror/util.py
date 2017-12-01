@@ -6,19 +6,14 @@ from tempfile import NamedTemporaryFile
 from tempfile import TemporaryDirectory
 import os
 
+import pkg_resources
 import boto3
 import json
 import yaml
 
-from plumbum import local
+from plumbum.machines.local import LocalCommand
 from plumbum.commands.processes import CommandNotFound
-gof3r = None
-try:
-    # local.get raises exceptions, violating Python norms of .get() not
-    # raising exceptions
-    gof3r = local.get('gof3r')
-except CommandNotFound:
-    pass
+gof3r = LocalCommand(pkg_resources.resource_filename(__name__, "gof3r"))
 
 s3 = boto3.resource('s3')
 

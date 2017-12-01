@@ -65,13 +65,13 @@ def pipe():
 def download_s3(cmd, s3_object):
     logger.info('Downloading %s', s3_object.key)
     if gof3r:
-        gof3r_cmd = s3gof3r[
+        gof3r_cmd = gof3r[
             'get',
             '--no-md5',
             '-b', s3_object.bucket_name,
             '-k', s3_object.key,
         ]
-        gof3r_cmd | cmd & FG
+        (gof3r_cmd | cmd) & FG
     else:
         with cmd.bgrun(stdin=PIPE) as future:
             s3_object.download_fileobj(future.stdin)

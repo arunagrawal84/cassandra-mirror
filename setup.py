@@ -14,6 +14,7 @@ setup(
             'check=cassandra_mirror.check:do_check',
         ]
     ),
+    package_data={ 'cassandra_mirror': ['gof3r'] },
     install_requires=[
         'boto3>=1.4.2',
         'PyYAML>=3.12',

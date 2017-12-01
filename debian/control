@@ -14,6 +14,6 @@ Build-Depends:
 
 Package: cassandra-mirror
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}, s3gof3r
+Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: mirrors data from Cassandra into other datastores
 

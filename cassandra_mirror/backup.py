@@ -163,7 +163,7 @@ def upload_s3(cmd, s3_object):
             '-k', s3_object.key,
         ]
 
-        cmd | gof3r_cmd & FG
+        (cmd | gof3r_cmd) & FG
     else:
         with cmd.bgrun() as proc:
             s3_object.upload_fileobj(proc.stdout)
